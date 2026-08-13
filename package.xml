@@ -30,6 +30,8 @@
   <depend>camera_info_manager</depend>
   <depend>builtin_interfaces</depend>
   <depend>image_transport</depend>
+  <depend>tf2_ros</depend>
+  <depend>geometry_msgs</depend>
   <depend>image_transport_plugins</depend>
   <depend>v4l-utils</depend>
 

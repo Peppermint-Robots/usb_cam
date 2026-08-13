@@ -59,7 +59,12 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions & node_options)
         this,
         std::placeholders::_1,
         std::placeholders::_2,
-        std::placeholders::_3)))
+        std::placeholders::_3))),
+  m_enable_undistortion(false),
+  m_undistorted_image_publisher(nullptr),
+  m_undistorted_image_msg(nullptr),
+  m_undistorted_camera_info_msg(nullptr),
+  m_undistort_maps_initialized(false)
 {
   // declare params
   this->declare_parameter("camera_name", "default_cam");
@@ -84,6 +89,7 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions & node_options)
   this->declare_parameter("autofocus", false);
   this->declare_parameter("focus", -1);  // 0-255, -1 "leave alone"
   this->declare_parameter("skip_device_check", false);  // allow bypassing V4L2 device list check
+  this->declare_parameter("enable_undistortion", false);  // enable fisheye undistortion
 
   get_params();
   init();
@@ -148,6 +154,19 @@ void UsbCamNode::init()
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
+  // Compute optical frame id by stripping "_base_frame" suffix and appending "_rgb_camera_optical_frame"
+  // e.g. "back_camera_base_frame" -> "back_camera_rgb_camera_optical_frame"
+  {
+    const std::string suffix = "_base_frame";
+    std::string base = m_parameters.frame_id;
+    if (base.size() >= suffix.size() &&
+        base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0)
+    {
+      base = base.substr(0, base.size() - suffix.size());
+    }
+    m_optical_frame_id = base + "_rgb_camera_optical_frame";
+  }
+
   // load the camera info
   m_camera_info.reset(
     new camera_info_manager::CameraInfoManager(
@@ -155,7 +174,7 @@ void UsbCamNode::init()
   // check for default camera info
   if (!m_camera_info->isCalibrated()) {
     m_camera_info->setCameraName(m_parameters.device_name);
-    m_camera_info_msg->header.frame_id = m_parameters.frame_id;
+    m_camera_info_msg->header.frame_id = m_optical_frame_id;
     m_camera_info_msg->width = m_parameters.image_width;
     m_camera_info_msg->height = m_parameters.image_height;
     m_camera_info->setCameraInfo(*m_camera_info_msg);
@@ -195,7 +214,44 @@ void UsbCamNode::init()
       "camera_info", rclcpp::QoS(100));
   }
 
-  m_image_msg->header.frame_id = m_parameters.frame_id;
+  // Initialize undistortion publisher if enabled
+  if (m_enable_undistortion) {
+    m_undistorted_image_msg.reset(new sensor_msgs::msg::Image());
+    m_undistorted_image_msg->header.frame_id = m_optical_frame_id;
+    m_undistorted_camera_info_msg.reset(new sensor_msgs::msg::CameraInfo());
+    std::string preview_topic = m_parameters.camera_name + "/preview/image_raw";
+    m_undistorted_image_publisher = std::make_shared<image_transport::CameraPublisher>(
+      image_transport::create_camera_publisher(this, preview_topic,
+      rclcpp::QoS {100}.get_rmw_qos_profile()));
+    RCLCPP_INFO(this->get_logger(), "Fisheye undistortion enabled - will publish on '%s/preview/image_raw' and '%s/preview/camera_info' topics", 
+      m_parameters.camera_name.c_str(), m_parameters.camera_name.c_str());
+  }
+
+  // Publish static transform: base_frame → optical_frame
+  // base_frame: x-forward, y-left, z-up
+  // optical_frame: x-right, y-down, z-forward
+  // Rotation quaternion (x, y, z, w) = (-0.5, 0.5, -0.5, 0.5)
+
+  m_static_tf_broadcaster = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+  {
+    geometry_msgs::msg::TransformStamped tf_msg;
+    tf_msg.header.stamp = this->get_clock()->now();
+    tf_msg.header.frame_id = m_parameters.frame_id;
+    tf_msg.child_frame_id = m_optical_frame_id;
+    tf_msg.transform.translation.x = 0.0;
+    tf_msg.transform.translation.y = 0.0;
+    tf_msg.transform.translation.z = 0.0;
+    // Rotation from body (x-fwd, y-left, z-up) to optical (x-right, y-down, z-fwd)
+    tf_msg.transform.rotation.x = -0.5;
+    tf_msg.transform.rotation.y =  0.5;
+    tf_msg.transform.rotation.z = -0.5;
+    tf_msg.transform.rotation.w =  0.5;
+    m_static_tf_broadcaster->sendTransform(tf_msg);
+    RCLCPP_INFO(this->get_logger(), "Publishing static TF: '%s' -> '%s'",
+      m_parameters.frame_id.c_str(), m_optical_frame_id.c_str());
+  }
+
+  m_image_msg->header.frame_id = m_optical_frame_id;
   RCLCPP_INFO(
     this->get_logger(), "Starting '%s' (%s) at %dx%d via %s (%s) at %i FPS",
     m_parameters.camera_name.c_str(), m_parameters.device_name.c_str(),
@@ -250,7 +306,7 @@ void UsbCamNode::get_params()
       "camera_name", "camera_info_url", "frame_id", "framerate", "image_height", "image_width",
       "io_method", "pixel_format", "av_device_format", "video_device", "brightness", "contrast",
       "saturation", "sharpness", "gain", "auto_white_balance", "white_balance", "autoexposure",
-      "exposure", "autofocus", "focus", "skip_device_check"
+      "exposure", "autofocus", "focus", "skip_device_check", "enable_undistortion"
     }
   );
 
@@ -306,6 +362,8 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter> & parameters
       m_parameters.focus = parameter.as_int();
     } else if (parameter.get_name() == "skip_device_check") {
       m_parameters.skip_device_check = parameter.as_bool();
+    } else if (parameter.get_name() == "enable_undistortion") {
+      m_enable_undistortion = parameter.as_bool();
     } else {
       RCLCPP_WARN(this->get_logger(), "Invalid parameter name: %s", parameter.get_name().c_str());
     }
@@ -464,6 +522,165 @@ void UsbCamNode::publish()
     m_compressed_cam_info_publisher->publish(*m_camera_info_msg);
   } else {
     m_image_publisher->publish(*m_image_msg, *m_camera_info_msg);
+    
+    // Publish undistorted image if enabled
+    if (m_enable_undistortion) {
+      undistort_image();
+    }
+  }
+}
+
+void UsbCamNode::init_undistortion_maps()
+{
+  if (m_undistort_maps_initialized) {
+    return;
+  }
+
+  // Get camera info
+  auto cam_info = m_camera_info->getCameraInfo();
+  
+  // Check if we have valid calibration
+  if (cam_info.k[0] == 0.0 || cam_info.d.size() < 4) {
+    RCLCPP_WARN_THROTTLE(
+      this->get_logger(), *this->get_clock(), 5000,
+      "No valid camera calibration found. Undistortion disabled. "
+      "Please provide camera_info_url parameter with calibration file.");
+    return;
+  }
+
+  // Extract camera matrix
+  m_camera_matrix = (cv::Mat_<double>(3, 3) <<
+    cam_info.k[0], cam_info.k[1], cam_info.k[2],
+    cam_info.k[3], cam_info.k[4], cam_info.k[5],
+    cam_info.k[6], cam_info.k[7], cam_info.k[8]);
+
+  // Extract distortion coefficients
+  m_distortion_coeffs = cv::Mat(cam_info.d.size(), 1, CV_64F);
+  for (size_t i = 0; i < cam_info.d.size(); ++i) {
+    m_distortion_coeffs.at<double>(i, 0) = cam_info.d[i];
+  }
+
+  cv::Size image_size(m_parameters.image_width, m_parameters.image_height);
+
+  // Check distortion model
+  if (cam_info.distortion_model == "equidistant" || cam_info.distortion_model == "fisheye") {
+    // Fisheye model
+    RCLCPP_INFO(this->get_logger(), "Initializing fisheye undistortion maps");
+    cv::Mat new_camera_matrix = m_camera_matrix.clone();
+    
+    try {
+      cv::fisheye::initUndistortRectifyMap(
+        m_camera_matrix,
+        m_distortion_coeffs,
+        cv::Mat(),
+        new_camera_matrix,
+        image_size,
+        CV_32FC1,
+        m_undistort_map1,
+        m_undistort_map2);
+      
+      m_undistort_maps_initialized = true;
+      RCLCPP_INFO(this->get_logger(), "Fisheye undistortion maps initialized successfully");
+    } catch (const cv::Exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "Failed to initialize fisheye undistortion maps: %s", e.what());
+      return;
+    }
+  } else {
+    // Standard pinhole model
+    RCLCPP_INFO(this->get_logger(), "Initializing standard undistortion maps");
+    cv::Mat new_camera_matrix = m_camera_matrix.clone();
+    
+    try {
+      cv::initUndistortRectifyMap(
+        m_camera_matrix,
+        m_distortion_coeffs,
+        cv::Mat(),
+        new_camera_matrix,
+        image_size,
+        CV_32FC1,
+        m_undistort_map1,
+        m_undistort_map2);
+      
+      m_undistort_maps_initialized = true;
+      RCLCPP_INFO(this->get_logger(), "Standard undistortion maps initialized successfully");
+    } catch (const cv::Exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "Failed to initialize undistortion maps: %s", e.what());
+      return;
+    }
+  }
+
+  // Setup undistorted camera info (identity rectification, no distortion)
+  *m_undistorted_camera_info_msg = cam_info;
+  m_undistorted_camera_info_msg->distortion_model = "plumb_bob";
+  m_undistorted_camera_info_msg->d = {0.0, 0.0, 0.0, 0.0, 0.0};
+}
+
+void UsbCamNode::undistort_image()
+{
+  // Initialize maps on first call
+  if (!m_undistort_maps_initialized) {
+    init_undistortion_maps();
+    if (!m_undistort_maps_initialized) {
+      return;  // Initialization failed
+    }
+  }
+
+  try {
+    // Convert ROS image to OpenCV Mat
+    cv::Mat src_image;
+    std::string out_encoding;
+    if (m_image_msg->encoding == "bgr8") {
+      src_image = cv::Mat(m_image_msg->height, m_image_msg->width, CV_8UC3,
+                          const_cast<uint8_t*>(m_image_msg->data.data()), m_image_msg->step);
+      out_encoding = "bgr8";
+    } else if (m_image_msg->encoding == "rgb8") {
+      // remap is channel-order agnostic, so no color conversion needed
+      src_image = cv::Mat(m_image_msg->height, m_image_msg->width, CV_8UC3,
+                          const_cast<uint8_t*>(m_image_msg->data.data()), m_image_msg->step);
+      out_encoding = "rgb8";
+    } else if (m_image_msg->encoding == "mono8") {
+      src_image = cv::Mat(m_image_msg->height, m_image_msg->width, CV_8UC1,
+                          const_cast<uint8_t*>(m_image_msg->data.data()), m_image_msg->step);
+      out_encoding = "mono8";
+    } else if (m_image_msg->encoding == "yuv422" || m_image_msg->encoding == "yuyv") {
+      // Convert YUYV to BGR
+      cv::Mat yuyv_image(m_image_msg->height, m_image_msg->width, CV_8UC2,
+                         const_cast<uint8_t*>(m_image_msg->data.data()), m_image_msg->step);
+      cv::cvtColor(yuyv_image, src_image, cv::COLOR_YUV2BGR_YUYV);
+      out_encoding = "bgr8";
+    } else {
+      RCLCPP_WARN_THROTTLE(
+        this->get_logger(), *this->get_clock(), 5000,
+        "Unsupported image encoding for undistortion: %s", m_image_msg->encoding.c_str());
+      return;
+    }
+
+    // Apply undistortion
+    cv::Mat dst_image;
+    cv::remap(src_image, dst_image, m_undistort_map1, m_undistort_map2, cv::INTER_LINEAR);
+
+    // Convert back to ROS message
+    m_undistorted_image_msg->header = m_image_msg->header;
+    m_undistorted_image_msg->height = dst_image.rows;
+    m_undistorted_image_msg->width = dst_image.cols;
+    m_undistorted_image_msg->encoding = out_encoding;
+    m_undistorted_image_msg->step = dst_image.step;
+    m_undistorted_image_msg->is_bigendian = false;
+    
+    size_t size = dst_image.step * dst_image.rows;
+    m_undistorted_image_msg->data.resize(size);
+    memcpy(&m_undistorted_image_msg->data[0], dst_image.data, size);
+
+    // Update and publish undistorted camera info
+    m_undistorted_camera_info_msg->header = m_image_msg->header;
+    
+    // Publish undistorted image with camera info
+    m_undistorted_image_publisher->publish(*m_undistorted_image_msg, *m_undistorted_camera_info_msg);
+    
+  } catch (const cv::Exception& e) {
+    RCLCPP_ERROR_THROTTLE(
+      this->get_logger(), *this->get_clock(), 5000,
+      "Error during image undistortion: %s", e.what());
   }
 }
 }  // namespace usb_cam

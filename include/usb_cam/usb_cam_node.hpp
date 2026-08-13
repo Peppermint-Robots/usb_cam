@@ -36,11 +36,15 @@
 #include <vector>
 
 #include "camera_info_manager/camera_info_manager.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "image_transport/image_transport.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "tf2_ros/static_transform_broadcaster.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
 #include "std_srvs/srv/set_bool.hpp"
+#include <opencv2/opencv.hpp>
+#include <opencv2/calib3d.hpp>
 
 #include "usb_cam/usb_cam.hpp"
 
@@ -96,6 +100,23 @@ public:
 
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr m_service_capture;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr m_parameters_callback_handle;
+
+  // Static TF broadcaster for optical frame
+  std::shared_ptr<tf2_ros::StaticTransformBroadcaster> m_static_tf_broadcaster;
+  std::string m_optical_frame_id;
+
+  // Fisheye undistortion support
+  bool m_enable_undistortion;
+  std::shared_ptr<image_transport::CameraPublisher> m_undistorted_image_publisher;
+  sensor_msgs::msg::Image::UniquePtr m_undistorted_image_msg;
+  sensor_msgs::msg::CameraInfo::SharedPtr m_undistorted_camera_info_msg;
+  cv::Mat m_undistort_map1;
+  cv::Mat m_undistort_map2;
+  cv::Mat m_camera_matrix;
+  cv::Mat m_distortion_coeffs;
+  bool m_undistort_maps_initialized;
+  void init_undistortion_maps();
+  void undistort_image();
 };
 }  // namespace usb_cam
 #endif  // USB_CAM__USB_CAM_NODE_HPP_
