@@ -39,7 +39,7 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "image_transport/image_transport.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "tf2_ros/static_transform_broadcaster.hpp"
+#include "tf2_ros/static_transform_broadcaster.h"
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
 #include "std_srvs/srv/set_bool.hpp"
