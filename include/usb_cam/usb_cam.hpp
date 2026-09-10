@@ -122,6 +122,8 @@ typedef struct parameters_t
   bool autofocus;
   // When true, UsbCamNode will not validate the device exists in available V4L2 devices
   bool skip_device_check;
+  // When true, UsbCamNode rotates the published image 180 degrees (upside-down mount)
+  bool flip_180;
 
   parameters_t()
 // *INDENT-OFF*
@@ -146,7 +148,8 @@ typedef struct parameters_t
     auto_white_balance(true),
     autoexposure(true),
     autofocus(false),
-    skip_device_check(false)
+    skip_device_check(false),
+    flip_180(false)
   {
   }
 // *INDENT-ON*

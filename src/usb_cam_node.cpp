@@ -90,6 +90,8 @@ UsbCamNode::UsbCamNode(const rclcpp::NodeOptions & node_options)
   this->declare_parameter("focus", -1);  // 0-255, -1 "leave alone"
   this->declare_parameter("skip_device_check", false);  // allow bypassing V4L2 device list check
   this->declare_parameter("enable_undistortion", false);  // enable fisheye undistortion
+  this->declare_parameter(
+      "flip_180", false); // rotate published image 180 deg (upside-down mount)
 
   get_params();
   init();
@@ -302,13 +304,14 @@ void UsbCamNode::get_params()
 {
   auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(this);
   auto parameters = parameters_client->get_parameters(
-    {
-      "camera_name", "camera_info_url", "frame_id", "framerate", "image_height", "image_width",
-      "io_method", "pixel_format", "av_device_format", "video_device", "brightness", "contrast",
-      "saturation", "sharpness", "gain", "auto_white_balance", "white_balance", "autoexposure",
-      "exposure", "autofocus", "focus", "skip_device_check", "enable_undistortion"
-    }
-  );
+      {"camera_name",        "camera_info_url",     "frame_id",
+       "framerate",          "image_height",        "image_width",
+       "io_method",          "pixel_format",        "av_device_format",
+       "video_device",       "brightness",          "contrast",
+       "saturation",         "sharpness",           "gain",
+       "auto_white_balance", "white_balance",       "autoexposure",
+       "exposure",           "autofocus",           "focus",
+       "skip_device_check",  "enable_undistortion", "flip_180"});
 
   assign_params(parameters);
 }
@@ -364,6 +367,8 @@ void UsbCamNode::assign_params(const std::vector<rclcpp::Parameter> & parameters
       m_parameters.skip_device_check = parameter.as_bool();
     } else if (parameter.get_name() == "enable_undistortion") {
       m_enable_undistortion = parameter.as_bool();
+    } else if (parameter.get_name() == "flip_180") {
+      m_parameters.flip_180 = parameter.as_bool();
     } else {
       RCLCPP_WARN(this->get_logger(), "Invalid parameter name: %s", parameter.get_name().c_str());
     }
@@ -463,7 +468,59 @@ bool UsbCamNode::take_and_send_image()
 
   *m_camera_info_msg = m_camera_info->getCameraInfo();
   m_camera_info_msg->header = m_image_msg->header;
+
+  if (m_parameters.flip_180) {
+    flip_image_180(*m_image_msg);
+    flip_camera_info_180(*m_camera_info_msg);
+  }
   return true;
+}
+
+/// @brief Rotate a raw image message 180 degrees in place, for an upside-down
+/// camera mount. 4:2:2 packed formats (yuyv/uyvy) are rotated at
+/// 2-pixel-macropixel granularity so the Y/U/Y/V byte order within each
+/// macropixel is preserved -- only row order and macropixel order within a row
+/// are reversed, which is exactly what a 180-degree rotation requires.
+void UsbCamNode::flip_image_180(sensor_msgs::msg::Image &img) {
+  int type;
+  int cols = img.width;
+  if (img.encoding == "mono8") {
+    type = CV_8UC1;
+  } else if (img.encoding == "rgb8" || img.encoding == "bgr8") {
+    type = CV_8UC3;
+  } else if (img.encoding == "yuyv" || img.encoding == "yuv422" ||
+             img.encoding == "uyvy") {
+    type = CV_8UC4;
+    cols = img.width / 2;
+  } else {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                         "flip_180 requested but encoding '%s' is not "
+                         "supported for in-driver rotation",
+                         img.encoding.c_str());
+    return;
+  }
+
+  cv::Mat src(img.height, cols, type, img.data.data(), img.step);
+  std::vector<uint8_t> flipped(img.data.size());
+  cv::Mat dst(img.height, cols, type, flipped.data(), img.step);
+  cv::flip(src, dst, -1); // flip across both axes == 180 degree rotation
+  img.data.swap(flipped);
+}
+
+/// @brief Adjust the principal point to match a 180-degree-rotated image so
+/// downstream consumers (rectification, the undistortion path below) stay
+/// geometrically correct. Focal lengths and distortion coefficients are
+/// unaffected by a 180-degree rotation.
+void UsbCamNode::flip_camera_info_180(sensor_msgs::msg::CameraInfo &info) {
+  if (info.k[0] == 0.0) {
+    return; // uncalibrated, nothing meaningful to adjust
+  }
+  info.k[2] = info.width - info.k[2];
+  info.k[5] = info.height - info.k[5];
+  if (info.p.size() == 12) {
+    info.p[2] = info.width - info.p[2];
+    info.p[6] = info.height - info.p[6];
+  }
 }
 
 bool UsbCamNode::take_and_send_image_mjpeg()
@@ -483,6 +540,14 @@ bool UsbCamNode::take_and_send_image_mjpeg()
 
   *m_camera_info_msg = m_camera_info->getCameraInfo();
   m_camera_info_msg->header = m_compressed_img_msg->header;
+
+  if (m_parameters.flip_180) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                         "flip_180 is not supported for raw mjpeg passthrough "
+                         "(pixel_format 'mjpeg'); "
+                         "use 'mjpeg2rgb' (or another raw pixel format) to get "
+                         "an in-driver corrected feed.");
+  }
 
   return true;
 }
@@ -538,7 +603,13 @@ void UsbCamNode::init_undistortion_maps()
 
   // Get camera info
   auto cam_info = m_camera_info->getCameraInfo();
-  
+  if (m_parameters.flip_180) {
+    // undistort_image() operates on m_image_msg, which is already rotated by
+    // this point, so the maps must be built against the rotated principal
+    // point.
+    flip_camera_info_180(cam_info);
+  }
+
   // Check if we have valid calibration
   if (cam_info.k[0] == 0.0 || cam_info.d.size() < 4) {
     RCLCPP_WARN_THROTTLE(

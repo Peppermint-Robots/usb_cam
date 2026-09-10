@@ -73,6 +73,8 @@ public:
   void publish();
   bool take_and_send_image();
   bool take_and_send_image_mjpeg();
+  void flip_image_180(sensor_msgs::msg::Image &img);
+  void flip_camera_info_180(sensor_msgs::msg::CameraInfo &info);
 
   rcl_interfaces::msg::SetParametersResult parameters_callback(
     const std::vector<rclcpp::Parameter> & parameters);
