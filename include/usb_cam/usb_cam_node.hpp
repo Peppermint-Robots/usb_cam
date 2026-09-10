@@ -105,6 +105,7 @@ public:
 
   // Static TF broadcaster for optical frame
   std::shared_ptr<tf2_ros::StaticTransformBroadcaster> m_static_tf_broadcaster;
+  std::string m_base_frame_id;
   std::string m_optical_frame_id;
 
   // Fisheye undistortion support

@@ -156,18 +156,10 @@ void UsbCamNode::init()
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
-  // Compute optical frame id by stripping "_base_frame" suffix and appending "_rgb_camera_optical_frame"
-  // e.g. "back_camera_base_frame" -> "back_camera_rgb_camera_optical_frame"
-  {
-    const std::string suffix = "_base_frame";
-    std::string base = m_parameters.frame_id;
-    if (base.size() >= suffix.size() &&
-        base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0)
-    {
-      base = base.substr(0, base.size() - suffix.size());
-    }
-    m_optical_frame_id = base + "_rgb_camera_optical_frame";
-  }
+  // Derive base and optical frame ids from camera_name, e.g. "fisheye_camera"
+  // -> "fisheye_camera_base_frame" / "back_camera_color_optical_frame"
+  m_base_frame_id = m_parameters.camera_name + "_base_frame";
+  m_optical_frame_id = m_parameters.camera_name + "_color_optical_frame";
 
   // load the camera info
   m_camera_info.reset(
@@ -238,7 +230,7 @@ void UsbCamNode::init()
   {
     geometry_msgs::msg::TransformStamped tf_msg;
     tf_msg.header.stamp = this->get_clock()->now();
-    tf_msg.header.frame_id = m_parameters.frame_id;
+    tf_msg.header.frame_id = m_base_frame_id;
     tf_msg.child_frame_id = m_optical_frame_id;
     tf_msg.transform.translation.x = 0.0;
     tf_msg.transform.translation.y = 0.0;
@@ -250,7 +242,7 @@ void UsbCamNode::init()
     tf_msg.transform.rotation.w =  0.5;
     m_static_tf_broadcaster->sendTransform(tf_msg);
     RCLCPP_INFO(this->get_logger(), "Publishing static TF: '%s' -> '%s'",
-      m_parameters.frame_id.c_str(), m_optical_frame_id.c_str());
+                m_base_frame_id.c_str(), m_optical_frame_id.c_str());
   }
 
   m_image_msg->header.frame_id = m_optical_frame_id;
